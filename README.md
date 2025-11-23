@@ -194,6 +194,10 @@ A: 对于私有镜像，您需要确保 GitHub Actions 工作流环境有权限�
 
 A: 默认超时时间为 30 分钟，您可以在 `cmd/ship/ship.go` 中修改 `timeout` 值。
 
+## 项目引用
+
+本项目中部分内容源自 [docker_image_pusher](https://github.com/tech-shrimp/docker_image_pusher) 项目。
+
 ## 许可证
 
 本项目采用 MIT 许可证。详见 [LICENSE](LICENSE) 文件。

@@ -1,0 +1,263 @@
+name: Auto Tag and Release
+
+on:
+  # 手动触发
+  workflow_dispatch:
+    inputs:
+      version_type:
+        description: '版本更新类型 (major/minor/patch)'
+        required: true
+        default: 'patch'
+        type: choice
+        options:
+          - major
+          - minor
+          - patch
+      custom_version:
+        description: '自定义版本号 (留空则自动计算)'
+        required: false
+  # 自动触发 - 当推送到main分支时
+  push:
+    branches:
+      - main
+    # 忽略某些类型的提交
+    paths-ignore:
+      - '**.md'
+      - '**.yaml'
+      - '**.yml'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      # 允许创建标签和release
+      contents: write
+      # 允许读取提交历史
+      actions: read
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          # 拉取完整历史以获取标签信息
+          fetch-depth: 0
+          # 设置token以推送标签
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 设置Git用户信息
+        run: |
+          git config --local user.email "github-actions@github.com"
+          git config --local user.name "GitHub Actions"
+
+      - name: 获取最新标签
+        id: get_latest_tag
+        run: |
+          # 获取最新的语义化版本标签，如果没有则使用默认值v0.0.0
+          latest_tag=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+          echo "latest_tag=${latest_tag}" >> $GITHUB_OUTPUT
+          echo "最新标签: ${latest_tag}"
+
+      - name: 计算新版本号
+        id: calculate_version
+        run: |
+          latest_tag=${{ steps.get_latest_tag.outputs.latest_tag }}
+          custom_version=${{ github.event.inputs.custom_version || '' }}
+          version_type=${{ github.event.inputs.version_type || 'patch' }}
+          
+          # 如果提供了自定义版本号，则使用它
+          if [ -n "$custom_version" ]; then
+            # 确保版本号以v开头
+            if [[ "$custom_version" != v* ]]; then
+              new_version="v$custom_version"
+            else
+              new_version="$custom_version"
+            fi
+          else
+            # 从最新标签中提取版本号部分（去掉v前缀）
+            version_num=${latest_tag#v}
+            
+            # 解析主版本、次版本和补丁版本
+            IFS='.' read -r major minor patch <<< "$version_num"
+            
+            # 根据版本类型更新版本号
+            case "$version_type" in
+              major)
+                major=$((major + 1))
+                minor=0
+                patch=0
+                ;;
+              minor)
+                minor=$((minor + 1))
+                patch=0
+                ;;
+              patch)
+                patch=$((patch + 1))
+                ;;
+            esac
+            
+            # 构建新版本号
+            new_version="v${major}.${minor}.${patch}"
+          fi
+          
+          echo "new_version=${new_version}" >> $GITHUB_OUTPUT
+          echo "新版本号: ${new_version}"
+
+      - name: 生成变更记录
+        id: generate_changelog
+        run: |
+          latest_tag=${{ steps.get_latest_tag.outputs.latest_tag }}
+          new_version=${{ steps.calculate_version.outputs.new_version }}
+          
+          # 创建临时文件保存变更记录
+          changelog_file=$(mktemp)
+          
+          # 添加版本标题
+          echo "## ${new_version}" > "$changelog_file"
+          echo "**发布日期:** $(date '+%Y-%m-%d')" >> "$changelog_file"
+          echo "" >> "$changelog_file"
+          
+          # 生成变更记录
+          if [ "$latest_tag" = "v0.0.0" ]; then
+            # 如果没有之前的标签，获取所有提交
+            echo "### 首次发布" >> "$changelog_file"
+            echo "" >> "$changelog_file"
+            git log --pretty=format:"- %s (%h) by %an" >> "$changelog_file"
+          else
+            # 获取两次标签之间的提交
+            echo "### 变更内容" >> "$changelog_file"
+            echo "" >> "$changelog_file"
+            git log "${latest_tag}..HEAD" --pretty=format:"- %s (%h) by %an" >> "$changelog_file"
+          fi
+          
+          # 如果没有变更记录，添加默认信息
+          if [ ! -s "$changelog_file" ] || [ "$(wc -l < "$changelog_file")" -le 3 ]; then
+            echo "- 进行了代码更新" >> "$changelog_file"
+          fi
+          
+          # 添加项目链接
+          echo "" >> "$changelog_file"
+          echo "[查看完整变更历史](https://github.com/${{ github.repository }}/commits/${new_version})" >> "$changelog_file"
+          
+          # 输出变更记录内容（用于调试）
+          echo "变更记录内容:"
+          cat "$changelog_file"
+          
+          # 将变更记录保存为输出
+          echo "changelog<<EOF" >> $GITHUB_OUTPUT
+          cat "$changelog_file" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          
+          # 清理临时文件
+          rm "$changelog_file"
+
+      - name: 检查标签是否已存在
+        id: check_tag_exists
+        run: |
+          new_version=${{ steps.calculate_version.outputs.new_version }}
+          if git rev-parse "$new_version" >/dev/null 2>&1; then
+            echo "tag_exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "tag_exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: 创建Git标签
+        id: create_tag
+        if: steps.check_tag_exists.outputs.tag_exists == 'false'
+        run: |
+          new_version=${{ steps.calculate_version.outputs.new_version }}
+          
+          # 创建带注释的标签
+          git tag -a "$new_version" -m "Release $new_version"
+          
+          # 推送标签到远程仓库
+          git push origin "$new_version"
+          
+          echo "标签 $new_version 已创建并推送"
+
+      - name: 检查Release是否已存在
+        id: check_release_exists
+        run: |
+          new_version=${{ steps.calculate_version.outputs.new_version }}
+          
+          # 使用GitHub API检查Release是否存在
+          if curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+             "https://api.github.com/repos/${{ github.repository }}/releases/tags/$new_version" | grep -q "tag_name"; then
+            echo "release_exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "release_exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: 设置Go环境
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'  # 使用项目的Go版本
+          check-latest: true
+
+      - name: 安装依赖
+        run: go mod tidy
+
+      - name: 构建多平台可执行文件
+        id: build
+        run: |
+          new_version=${{ steps.calculate_version.outputs.new_version }}
+          # 创建构建输出目录
+          mkdir -p build_output
+          
+          # 构建Linux版本(amd64)
+          echo "构建Linux amd64版本..."
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-s -w -X main.version=$new_version" -o build_output/image-shipper-linux-amd64 main.go
+          
+          # 构建Linux版本(arm64)
+          echo "构建Linux arm64版本..."
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags "-s -w -X main.version=$new_version" -o build_output/image-shipper-linux-arm64 main.go
+          
+          # 构建Windows版本
+          echo "构建Windows版本..."
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags "-s -w -X main.version=$new_version" -o build_output/image-shipper-windows-amd64.exe main.go
+          
+          # 构建macOS版本
+          echo "构建macOS版本..."
+          CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -ldflags "-s -w -X main.version=$new_version" -o build_output/image-shipper-darwin-amd64 main.go
+          
+          # 构建macOS ARM64版本
+          echo "构建macOS ARM64版本..."
+          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -ldflags "-s -w -X main.version=$new_version" -o build_output/image-shipper-darwin-arm64 main.go
+          
+          # 显示构建结果
+          ls -la build_output/
+          
+          # 设置输出参数
+          echo "build_dir=build_output" >> $GITHUB_OUTPUT
+
+      - name: 创建GitHub Release并上传可执行文件
+        id: create_release
+        if: steps.check_release_exists.outputs.release_exists == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.calculate_version.outputs.new_version }}
+          name: Release ${{ steps.calculate_version.outputs.new_version }}
+          body: ${{ steps.generate_changelog.outputs.changelog }}
+          draft: false
+          prerelease: false
+          files: |
+            ${{ steps.build.outputs.build_dir }}/image-shipper-linux-amd64
+            ${{ steps.build.outputs.build_dir }}/image-shipper-linux-arm64
+            ${{ steps.build.outputs.build_dir }}/image-shipper-windows-amd64.exe
+            ${{ steps.build.outputs.build_dir }}/image-shipper-darwin-amd64
+            ${{ steps.build.outputs.build_dir }}/image-shipper-darwin-arm64
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 发布成功通知
+        if: success()
+        run: |
+          echo "✅ 自动标签和Release创建成功！"
+          echo "📦 版本: ${{ steps.calculate_version.outputs.new_version }}"
+          echo "🔗 Release URL: https://github.com/${{ github.repository }}/releases/tag/${{ steps.calculate_version.outputs.new_version }}"
+
+      - name: 错误处理
+        if: failure()
+        run: |
+          echo "❌ 自动标签和Release创建失败！"
+          echo "请检查日志以获取更多详细信息。"
+          # 设置错误退出码
+          exit 1
