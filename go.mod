@@ -6,6 +6,7 @@ require (
 	github.com/google/go-github/v79 v79.0.0
 	go.uber.org/zap v1.25.0
 	golang.org/x/oauth2 v0.10.0
+	gopkg.in/yaml.v2 v2.4.0
 )
 
 require (
