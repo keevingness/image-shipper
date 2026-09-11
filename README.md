@@ -68,7 +68,9 @@ export IMGSHIPPER_GITHUB_REPO="image-shipper"  # 默认值
 export IMGSHIPPER_GITHUB_WORKFLOW="image-shipper.yaml"  # 默认值
 
 # Pull 命令配置
-export IMGSHIPPER_PULL_SOURCE_REGISTRY="docker.io/library"  # 默认值
+# 不设置源仓库时，Docker Hub 镜像会依次尝试内置的多个镜像加速站
+# 设置后将只使用指定的自定义镜像仓库前缀
+export IMGSHIPPER_PULL_SOURCE_REGISTRY="mirror.example.com/docker"
 export IMGSHIPPER_PULL_CONTAINER_RUNTIME="docker"  # 默认值
 ```
 
@@ -103,14 +105,17 @@ pull:
 ### 镜像拉取 (pull 命令)
 
 ```bash
-# 使用默认 Docker 拉取镜像
-./image-shipper pull nginx:latest
+# 默认依次尝试内置的 Docker Hub 镜像加速站，成功后恢复为 postgres:15.19-trixie
+./image-shipper pull postgres:15.19-trixie
 
-# 使用 Podman 拉取镜像
-./image-shipper pull nginx:latest --podman
+# 仅显示将要尝试的镜像地址
+./image-shipper pull --dry-run postgres:15.19-trixie
+
+# 使用 Podman 拉取镜像（选项应放在镜像名称前）
+./image-shipper pull --podman nginx:latest
 
 # 使用自定义容器运行时
-./image-shipper pull nginx:latest -e 'k3s crictl'
+./image-shipper pull -e 'k3s crictl' nginx:latest
 
 # 拉取自定义应用镜像
 ./image-shipper pull custom/app:v1.0
@@ -121,10 +126,20 @@ pull:
 # 从 Kubernetes YAML 文件中拉取所有镜像
 ./image-shipper pull -f kubernetes-manifest.yaml
 
-# 仅显示文件中包含的镜像，不执行实际拉取
-./image-shipper pull -f docker-compose.yaml --dry-run
-./image-shipper pull -f kubernetes-manifest.yaml --dry-run
+# 仅显示文件中包含的镜像及候选地址，不执行实际拉取
+./image-shipper pull --dry-run -f docker-compose.yaml
+./image-shipper pull --dry-run -f kubernetes-manifest.yaml
 ```
+
+默认情况下，Docker Hub 镜像会依次尝试以下地址，首个拉取成功后停止：
+
+1. `swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/<镜像>`
+2. `gh-proxy.org/docker/<镜像>`
+3. `v4.gh-proxy.org/docker/<镜像>`
+4. `v6.gh-proxy.org/docker/<镜像>`
+5. `cdn.gh-proxy.org/docker/<镜像>`
+
+成功后，程序会自动将代理地址的镜像重新标记为原镜像名，并清理代理标签。例如 `postgres:15.19-trixie` 最终仍以 `postgres:15.19-trixie` 保存在本地。非 Docker Hub 镜像默认直接从原地址拉取。设置 `IMGSHIPPER_PULL_SOURCE_REGISTRY` 后，会优先使用指定的单一镜像仓库前缀，不再尝试内置列表。
 
 ### 帮助信息
 

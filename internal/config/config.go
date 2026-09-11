@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 )
 
 // Config 应用程序配置结构
@@ -21,8 +22,27 @@ type GitHubConfig struct {
 
 // PullConfig Pull命令配置
 type PullConfig struct {
-	SourceRegistry   string `mapstructure:"source_registry"`
-	ContainerRuntime string `mapstructure:"container_runtime"`
+	SourceRegistry    string `mapstructure:"source_registry"`
+	ContainerRuntime  string `mapstructure:"container_runtime"`
+	UseDefaultMirrors bool   `mapstructure:"-"`
+}
+
+// LoadPullWithDefaults 加载 pull 命令配置，不要求 GitHub 凭据。
+func LoadPullWithDefaults() (*PullConfig, error) {
+	config := &PullConfig{
+		ContainerRuntime:  "docker",
+		UseDefaultMirrors: true,
+	}
+
+	if sourceRegistry := strings.TrimSpace(os.Getenv("IMGSHIPPER_PULL_SOURCE_REGISTRY")); sourceRegistry != "" {
+		config.SourceRegistry = strings.TrimRight(sourceRegistry, "/")
+		config.UseDefaultMirrors = false
+	}
+	if containerRuntime := strings.TrimSpace(os.Getenv("IMGSHIPPER_PULL_CONTAINER_RUNTIME")); containerRuntime != "" {
+		config.ContainerRuntime = containerRuntime
+	}
+
+	return config, nil
 }
 
 // LoadWithDefaults 从环境变量加载配置

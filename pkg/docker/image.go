@@ -4,47 +4,116 @@ import (
 	"strings"
 )
 
-// ParseImageReference 解析Docker镜像引用
-func ParseImageReference(imageRef string) (registry, image, tag string, err error) {
-	// 默认值
-	registry = ""
-	image = ""
-	tag = "latest" // 默认标签
+// ImageReference 是规范化后的容器镜像引用。
+type ImageReference struct {
+	Registry   string
+	Repository string
+	Tag        string
+	DockerHub  bool
+}
 
-	// 分割镜像引用
-	parts := strings.Split(imageRef, ":")
-	if len(parts) == 0 {
-		return "", "", "", ErrInvalidImageRef
+// NormalizeImageReference 规范化带标签的 Docker 镜像引用。
+// 当前不支持 digest 引用，因为拉取后无法安全地推断目标标签。
+func NormalizeImageReference(input string) (ImageReference, error) {
+	input = strings.TrimSpace(input)
+	if input == "" || strings.ContainsAny(input, " \t\r\n") || strings.Contains(input, "@") {
+		return ImageReference{}, ErrInvalidImageRef
 	}
 
-	// 处理包含标签的情况
-	if len(parts) > 1 {
-		// 检查最后一部分是否是标签（通常较短且不包含/）
-		potentialTag := parts[len(parts)-1]
-		if !strings.Contains(potentialTag, "/") {
-			tag = potentialTag
-			imageRef = strings.Join(parts[:len(parts)-1], ":")
+	name := input
+	tag := "latest"
+	lastSlash := strings.LastIndex(name, "/")
+	lastColon := strings.LastIndex(name, ":")
+	if lastColon > lastSlash {
+		tag = name[lastColon+1:]
+		name = name[:lastColon]
+		if tag == "" {
+			return ImageReference{}, ErrInvalidImageRef
 		}
 	}
 
-	// 分割仓库和镜像
-	parts = strings.Split(imageRef, "/")
-	if len(parts) == 0 {
-		return "", "", "", ErrInvalidImageRef
+	parts := strings.Split(name, "/")
+	for _, part := range parts {
+		if part == "" {
+			return ImageReference{}, ErrInvalidImageRef
+		}
 	}
 
-	// 如果包含域名或IP，则第一部分是仓库
-	if len(parts) > 1 && (strings.Contains(parts[0], ".") || strings.Contains(parts[0], ":") || parts[0] == "localhost") {
+	registry := "docker.io"
+	repository := name
+	if len(parts) > 1 && isRegistry(parts[0]) {
 		registry = parts[0]
-		image = strings.Join(parts[1:], "/")
-	} else {
-		image = strings.Join(parts, "/")
+		repository = strings.Join(parts[1:], "/")
 	}
 
-	// 验证结果
-	if image == "" {
-		return "", "", "", ErrInvalidImageRef
+	dockerHub := isDockerHubRegistry(registry)
+	if dockerHub {
+		registry = "docker.io"
+		if !strings.Contains(repository, "/") {
+			repository = "library/" + repository
+		}
 	}
 
-	return registry, image, tag, nil
+	if repository == "" {
+		return ImageReference{}, ErrInvalidImageRef
+	}
+
+	return ImageReference{
+		Registry:   registry,
+		Repository: repository,
+		Tag:        tag,
+		DockerHub:  dockerHub,
+	}, nil
+}
+
+// TargetReference 返回拉取成功后应保留在本地的镜像名。
+func (r ImageReference) TargetReference() string {
+	repository := r.Repository
+	if r.DockerHub {
+		repository = strings.TrimPrefix(repository, "library/")
+		return repository + ":" + r.Tag
+	}
+	return r.Registry + "/" + repository + ":" + r.Tag
+}
+
+// DockerHubMirrorPath 返回 Docker Hub 镜像在代理站中的路径。
+func (r ImageReference) DockerHubMirrorPath() string {
+	if !r.DockerHub {
+		return ""
+	}
+	return strings.TrimPrefix(r.Repository, "library/") + ":" + r.Tag
+}
+
+func isRegistry(part string) bool {
+	return strings.Contains(part, ".") || strings.Contains(part, ":") || part == "localhost"
+}
+
+func isDockerHubRegistry(registry string) bool {
+	switch registry {
+	case "docker.io", "index.docker.io", "registry-1.docker.io":
+		return true
+	default:
+		return false
+	}
+}
+
+// ParseImageReference 解析Docker镜像引用。
+func ParseImageReference(imageRef string) (registry, image, tag string, err error) {
+	ref, err := NormalizeImageReference(imageRef)
+	if err != nil {
+		return "", "", "", err
+	}
+	if ref.DockerHub {
+		if hasExplicitRegistry(imageRef) {
+			return ref.Registry, ref.Repository, ref.Tag, nil
+		}
+		return "", strings.TrimPrefix(ref.Repository, "library/"), ref.Tag, nil
+	}
+	return ref.Registry, ref.Repository, ref.Tag, nil
+}
+
+func hasExplicitRegistry(imageRef string) bool {
+	name := strings.SplitN(imageRef, "@", 2)[0]
+	first := strings.SplitN(name, "/", 2)[0]
+	return strings.Contains(name, "/") && isRegistry(first)
 }
