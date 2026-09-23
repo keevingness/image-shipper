@@ -97,6 +97,36 @@ func isDockerHubRegistry(registry string) bool {
 	}
 }
 
+// TrimDockerHubPrefix 去掉显式的 Docker Hub registry 前缀（docker.io/ 等）。
+// docker.io 是默认 registry，去掉后引用完全等价，
+// 且可避免转存时目标仓库命名中出现 "docker.io" 层级。
+// 支持可选的 "--platform=xxx" 前缀。
+func TrimDockerHubPrefix(imageRef string) string {
+	s := strings.TrimSpace(imageRef)
+	if s == "" {
+		return imageRef
+	}
+	platformPrefix := ""
+	if strings.HasPrefix(s, "--platform") {
+		idx := strings.IndexAny(s, " \t")
+		if idx < 0 {
+			return imageRef
+		}
+		platformPrefix = s[:idx]
+		s = strings.TrimSpace(s[idx+1:])
+	}
+	for _, prefix := range []string{"docker.io/", "index.docker.io/", "registry-1.docker.io/"} {
+		if strings.HasPrefix(s, prefix) {
+			s = s[len(prefix):]
+			break
+		}
+	}
+	if platformPrefix == "" {
+		return s
+	}
+	return platformPrefix + " " + s
+}
+
 // ParseImageReference 解析Docker镜像引用。
 func ParseImageReference(imageRef string) (registry, image, tag string, err error) {
 	ref, err := NormalizeImageReference(imageRef)

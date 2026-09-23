@@ -135,3 +135,21 @@ func TestNormalizeImageReferenceRejectsUnsupportedReferences(t *testing.T) {
 		})
 	}
 }
+
+func TestTrimDockerHubPrefix(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"docker.io/rancher/pause:3.10.2", "rancher/pause:3.10.2"},
+		{"index.docker.io/rancher/pause:3.10.2", "rancher/pause:3.10.2"},
+		{"registry-1.docker.io/rancher/pause:3.10.2", "rancher/pause:3.10.2"},
+		{"docker.io/library/nginx:latest", "library/nginx:latest"},
+		{"rancher/pause:3.10.2", "rancher/pause:3.10.2"},
+		{"quay.io/prometheus/prometheus:v3.0.0", "quay.io/prometheus/prometheus:v3.0.0"},
+		{"--platform=linux/arm64 docker.io/rancher/pause:3.10.2", "--platform=linux/arm64 rancher/pause:3.10.2"},
+		{"", ""},
+	}
+	for _, c := range cases {
+		if got := TrimDockerHubPrefix(c.in); got != c.want {
+			t.Errorf("TrimDockerHubPrefix(%q) = %q, 期望 %q", c.in, got, c.want)
+		}
+	}
+}

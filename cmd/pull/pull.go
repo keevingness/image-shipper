@@ -158,6 +158,9 @@ func Run() {
 			fmt.Printf("解析文件失败: %v\n", err)
 			os.Exit(1)
 		}
+		for i := range images {
+			images[i] = docker.TrimDockerHubPrefix(images[i])
+		}
 		fmt.Printf("从文件 %s 中解析出以下镜像:\n", *filePath)
 		for i, image := range images {
 			fmt.Printf("%d. %s\n", i+1, image)

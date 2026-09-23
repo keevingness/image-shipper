@@ -13,6 +13,7 @@ import (
 
 	"github.com/keevingness/image-shipper/internal/config"
 	"github.com/keevingness/image-shipper/internal/github"
+	"github.com/keevingness/image-shipper/pkg/docker"
 	"github.com/keevingness/image-shipper/pkg/yamlparser"
 )
 
@@ -41,6 +42,9 @@ func Run() {
 		if err != nil {
 			fmt.Printf("解析文件失败: %v\n", err)
 			os.Exit(1)
+		}
+		for i := range images {
+			images[i] = docker.TrimDockerHubPrefix(images[i])
 		}
 		
 		// 显示解析出的镜像
@@ -99,6 +103,7 @@ func Run() {
 		fmt.Println("错误: 镜像地址不能为空")
 		os.Exit(1)
 	}
+	imageURL = docker.TrimDockerHubPrefix(imageURL)
 	
 	// 如果是dry-run模式，则不执行实际推送
 	if dryRun {
