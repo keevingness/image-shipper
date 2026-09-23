@@ -3,6 +3,8 @@ package github
 import (
 	"context"
 	"fmt"
+	"strconv"
+	"sync"
 	"time"
 
 	"github.com/google/go-github/v79/github"
@@ -12,6 +14,9 @@ import (
 	"github.com/keevingness/image-shipper/internal/types"
 )
 
+// dispatchInterval 两次工作流触发的最小间隔，保证创建时间可区分，便于运行匹配
+const dispatchInterval = 1100 * time.Millisecond
+
 // Client GitHub客户端封装
 type Client struct {
 	client   *github.Client
@@ -19,6 +24,13 @@ type Client struct {
 	owner    string
 	repo     string
 	workflow string
+
+	dispatchMu   sync.Mutex
+	lastDispatch time.Time
+
+	claimMu sync.Mutex
+	// claimed 记录 requestID -> workflow run ID，保证轮询期间跟踪同一个运行
+	claimed map[string]int64
 }
 
 // NewClient 创建新的GitHub客户端
@@ -35,13 +47,24 @@ func NewClient(token, owner, repo, workflow string, logger *zap.Logger) *Client 
 		owner:    owner,
 		repo:     repo,
 		workflow: workflow,
+		claimed:  make(map[string]int64),
 	}
 }
 
 // TriggerMirrorWorkflow 触发镜像转存工作流
 func (c *Client) TriggerMirrorWorkflow(sourceImage, targetRegistry string) (*types.MirrorRequest, error) {
-	// 生成唯一ID
-	requestID := fmt.Sprintf("%d", time.Now().Unix())
+	// 串行化触发并保证最小间隔，避免并发 dispatch 落在同一秒无法区分
+	c.dispatchMu.Lock()
+	if !c.lastDispatch.IsZero() {
+		if wait := dispatchInterval - time.Since(c.lastDispatch); wait > 0 {
+			time.Sleep(wait)
+		}
+	}
+	c.lastDispatch = time.Now()
+	c.dispatchMu.Unlock()
+
+	// 生成唯一ID（纳秒时间戳，支持并发触发）
+	requestID := strconv.FormatInt(time.Now().UnixNano(), 10)
 
 	// 准备工作流输入参数
 	// 工作流文件期望接收一个名为docker_image的参数
@@ -97,7 +120,22 @@ func (c *Client) TriggerMirrorWorkflow(sourceImage, targetRegistry string) (*typ
 }
 
 // GetWorkflowStatus 获取工作流状态
+// 首次查询时从触发时间之后的运行中认领一个（选创建时间最接近触发时间的），
+// 后续轮询固定跟踪同一个运行，避免并发触发时互相干扰
 func (c *Client) GetWorkflowStatus(requestID string) (*types.GitHubWorkflowResponse, error) {
+	requestTime, err := parseRequestTime(requestID)
+	if err != nil {
+		return nil, err
+	}
+
+	// 已认领的运行直接查询
+	c.claimMu.Lock()
+	runID, claimed := c.claimed[requestID]
+	c.claimMu.Unlock()
+	if claimed {
+		return c.getRunStatus(runID)
+	}
+
 	// 获取工作流运行列表，按创建时间降序排列
 	runs, _, err := c.client.Actions.ListWorkflowRunsByFileName(
 		context.Background(),
@@ -105,7 +143,8 @@ func (c *Client) GetWorkflowStatus(requestID string) (*types.GitHubWorkflowRespo
 		c.repo,
 		c.workflow,
 		&github.ListWorkflowRunsOptions{
-			Event: "workflow_dispatch",
+			Event:       "workflow_dispatch",
+			ListOptions: github.ListOptions{PerPage: 50},
 		},
 	)
 	if err != nil {
@@ -113,74 +152,96 @@ func (c *Client) GetWorkflowStatus(requestID string) (*types.GitHubWorkflowRespo
 		return nil, fmt.Errorf("failed to list workflow runs: %w", err)
 	}
 
-	// 将request_id转换为时间戳，用于时间匹配
-	requestTime, err := time.Parse(time.RFC3339, requestID)
-	if err != nil {
-		// 如果requestID不是RFC3339格式，尝试将其解析为Unix时间戳
-		timestamp, err := time.Parse(time.RFC3339, time.Unix(0, 0).Add(time.Duration(parseInt(requestID))*time.Second).Format(time.RFC3339))
-		if err != nil {
-			return nil, fmt.Errorf("invalid request_id format: %w", err)
-		}
-		requestTime = timestamp
+	// 认领一个运行
+	c.claimMu.Lock()
+	selected := selectRun(runs.WorkflowRuns, requestTime, c.claimed)
+	if selected != nil {
+		c.claimed[requestID] = selected.GetID()
+	}
+	c.claimMu.Unlock()
+
+	if selected == nil {
+		// 触发的工作流尚未出现在运行列表中，视为 pending 继续等待
+		return &types.GitHubWorkflowResponse{Status: "pending", Conclusion: "unknown"}, nil
 	}
 
-	// 查找最近的工作流运行
-	if len(runs.WorkflowRuns) > 0 {
-		// 获取最新的工作流运行
-		run := runs.WorkflowRuns[0]
-
-		// 获取工作流运行的详细信息
-		runDetail, _, err := c.client.Actions.GetWorkflowRunByID(
-			context.Background(),
-			c.owner,
-			c.repo,
-			run.GetID(),
-		)
-		if err != nil {
-			c.logger.Error("Failed to get workflow run details", zap.Error(err))
-			return nil, fmt.Errorf("failed to get workflow run details: %w", err)
-		}
-
-		// 检查工作流创建时间是否与request_id匹配（允许5分钟的时间差）
-		if run.CreatedAt != nil {
-			diff := run.CreatedAt.Sub(requestTime)
-			if diff < 5*time.Minute && diff > -5*time.Minute {
-				// 找到匹配的工作流运行
-				status := "unknown"
-				if runDetail.Status != nil {
-					status = *runDetail.Status
-				}
-
-				conclusion := "unknown"
-				if runDetail.Conclusion != nil {
-					conclusion = *runDetail.Conclusion
-				}
-
-				url := ""
-				if runDetail.HTMLURL != nil {
-					url = *runDetail.HTMLURL
-				}
-
-				return &types.GitHubWorkflowResponse{
-					WorkflowID: runDetail.GetID(),
-					Status:     status,
-					Conclusion: conclusion,
-					URL:        url,
-				}, nil
-			}
-		}
-	}
-
-	return nil, fmt.Errorf("workflow run with request_id %s not found", requestID)
+	return c.getRunStatus(selected.GetID())
 }
 
-// parseInt 辅助函数，将字符串转换为int
-func parseInt(s string) int64 {
-	var result int64
-	for _, r := range s {
-		if r >= '0' && r <= '9' {
-			result = result*10 + int64(r-'0')
+// selectRun 在运行列表中为请求选择一个未认领的运行：
+// 创建时间不早于触发时间前2秒，且与触发时间最接近
+func selectRun(runs []*github.WorkflowRun, requestTime time.Time, claimed map[string]int64) *github.WorkflowRun {
+	var best *github.WorkflowRun
+	var bestDiff time.Duration
+	for _, run := range runs {
+		if run.CreatedAt == nil || run.CreatedAt.Before(requestTime.Add(-2*time.Second)) {
+			continue
+		}
+		isClaimed := false
+		for _, id := range claimed {
+			if id == run.GetID() {
+				isClaimed = true
+				break
+			}
+		}
+		if isClaimed {
+			continue
+		}
+		diff := run.CreatedAt.Sub(requestTime)
+		if diff < 0 {
+			diff = -diff
+		}
+		if best == nil || diff < bestDiff {
+			best, bestDiff = run, diff
 		}
 	}
-	return result
+	return best
+}
+
+// getRunStatus 查询单个工作流运行的详细状态
+func (c *Client) getRunStatus(runID int64) (*types.GitHubWorkflowResponse, error) {
+	runDetail, _, err := c.client.Actions.GetWorkflowRunByID(
+		context.Background(),
+		c.owner,
+		c.repo,
+		runID,
+	)
+	if err != nil {
+		c.logger.Error("Failed to get workflow run details", zap.Error(err))
+		return nil, fmt.Errorf("failed to get workflow run details: %w", err)
+	}
+
+	status := "unknown"
+	if runDetail.Status != nil {
+		status = *runDetail.Status
+	}
+	conclusion := "unknown"
+	if runDetail.Conclusion != nil {
+		conclusion = *runDetail.Conclusion
+	}
+	url := ""
+	if runDetail.HTMLURL != nil {
+		url = *runDetail.HTMLURL
+	}
+
+	return &types.GitHubWorkflowResponse{
+		WorkflowID: runDetail.GetID(),
+		Status:     status,
+		Conclusion: conclusion,
+		URL:        url,
+	}, nil
+}
+
+// parseRequestTime 解析 requestID 中的触发时间，兼容纳秒/秒时间戳和 RFC3339 格式
+func parseRequestTime(requestID string) (time.Time, error) {
+	if t, err := time.Parse(time.RFC3339, requestID); err == nil {
+		return t, nil
+	}
+	if n, err := strconv.ParseInt(requestID, 10, 64); err == nil {
+		if n > int64(time.Minute) { // 纳秒时间戳远大于秒时间戳
+			return time.Unix(0, n), nil
+		}
+		return time.Unix(n, 0), nil
+	}
+	return time.Time{}, fmt.Errorf("invalid request_id format: %s", requestID)
 }
