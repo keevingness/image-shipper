@@ -12,6 +12,7 @@
 -   **镜像转存**：通过 GitHub Actions 自动将镜像从源仓库转存到目标仓库
 -   **镜像拉取**：支持从指定镜像站拉取镜像并根据需要重新标记，实现镜像地址转换
 -   **YAML 文件解析**：支持从 Docker Compose 和 Kubernetes YAML 文件中自动解析并提取所有镜像
+-   **纯文本镜像列表**：支持 `.txt` 文件，每行一个镜像地址，支持空行和 `#` 注释
 -   **多容器运行时支持**：支持 Docker、Podman 和自定义容器运行时
 -   **配置灵活**：支持环境变量和配置文件两种配置方式
 -   **实时状态监控**：提供工作流执行状态的实时反馈
@@ -125,6 +126,9 @@ pull:
 
 # 从 Kubernetes YAML 文件中拉取所有镜像
 ./image-shipper pull -f kubernetes-manifest.yaml
+
+# 从纯文本镜像列表文件中拉取所有镜像（每行一个镜像，支持空行和 # 注释）
+./image-shipper pull -f test.txt
 
 # 仅显示文件中包含的镜像及候选地址，不执行实际拉取
 ./image-shipper pull --dry-run -f docker-compose.yaml

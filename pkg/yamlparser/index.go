@@ -15,6 +15,8 @@ const (
 	FileTypeCompose FileType = "compose"
 	// FileTypeK8s Kubernetes文件
 	FileTypeK8s FileType = "k8s"
+	// FileTypeText 纯文本镜像列表文件
+	FileTypeText FileType = "text"
 )
 
 // ParseFile 解析YAML文件并提取镜像
@@ -25,6 +27,9 @@ func ParseFile(filePath string) ([]string, error) {
 	
 	// 根据检测到的文件类型优先使用对应解析器
 	switch fileType {
+	case FileTypeText:
+		// 纯文本文件，每行一个镜像地址
+		return ParseTextFile(filePath)
 	case FileTypeCompose:
 		// 优先尝试作为docker-compose文件解析
 		composeImages, err := ParseComposeFile(filePath)
@@ -97,6 +102,10 @@ func DetectFileType(filePath string) FileType {
 	// 识别k8s相关文件名
 	if strings.Contains(filePath, "k8s") || strings.Contains(filePath, "kubernetes") || strings.Contains(filePath, "istio") {
 		return FileTypeK8s
+	}
+	// 纯文本镜像列表文件
+	if strings.HasSuffix(filePath, ".txt") {
+		return FileTypeText
 	}
 	// 其他可能的YAML文件扩展名
 	if strings.HasSuffix(filePath, ".yaml") || strings.HasSuffix(filePath, ".yml") {

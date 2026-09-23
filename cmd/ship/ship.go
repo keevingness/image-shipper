@@ -19,8 +19,9 @@ import (
 func Run() {
 	// 解析命令行参数
 	fs := flag.NewFlagSet("ship", flag.ExitOnError)
-	filePath := fs.String("f", "", "指定Docker Compose或Kubernetes YAML文件路径")
-	dryRun := fs.Bool("dry-run", false, "仅解析文件并显示镜像，不执行实际推送操作")
+	filePath := fs.String("f", "", "指定Docker Compose/Kubernetes YAML或纯文本镜像列表文件路径")
+	dryRunFlag := fs.Bool("dry-run", false, "仅解析文件并显示镜像，不执行实际推送操作")
+	drFlag := fs.Bool("dr", false, "同 --dry-run")
 	
 	// 解析参数
 	if len(os.Args) < 3 {
@@ -30,6 +31,7 @@ func Run() {
 	
 	// 解析标志
 	fs.Parse(os.Args[2:])
+	dryRun := *dryRunFlag || *drFlag
 	
 	// 检查是否指定了文件路径
 	if *filePath != "" {
@@ -47,7 +49,7 @@ func Run() {
 		}
 		
 		// 如果是dry-run模式，则不执行实际推送
-		if *dryRun {
+		if dryRun {
 			fmt.Println("\n📝 注意: 运行在dry-run模式下，未执行实际推送操作")
 			return
 		}
@@ -103,7 +105,7 @@ func Run() {
 	}
 	
 	// 如果是dry-run模式，则不执行实际推送
-	if *dryRun {
+	if dryRun {
 		fmt.Printf("📝 注意: 运行在dry-run模式下，将处理镜像: %s\n", imageURL)
 		return
 	}
@@ -275,19 +277,21 @@ func printUsage() {
 	fmt.Println("")
 	fmt.Println("用法:")
 	fmt.Println("  ./app ship <镜像地址>")
-	fmt.Println("  ./app ship -f <docker-compose.yaml或k8s yaml文件路径>")
-	fmt.Println("  ./app ship -f <docker-compose.yaml或k8s yaml文件路径> --dry-run  # 仅解析文件并显示镜像，不执行实际推送")
+	fmt.Println("  ./app ship -f <docker-compose.yaml/k8s yaml/纯文本镜像列表文件路径>")
+	fmt.Println("  ./app ship -f <docker-compose.yaml/k8s yaml/纯文本镜像列表文件路径> --dry-run  # 仅解析文件并显示镜像，不执行实际推送")
 	fmt.Println("")
 	fmt.Println("选项:")
-	fmt.Println("  -f <文件路径>   指定Docker Compose或Kubernetes YAML文件路径")
-	fmt.Println("  --dry-run       仅解析文件并显示镜像，不执行实际推送操作")
+	fmt.Println("  -f <文件路径>   指定Docker Compose/Kubernetes YAML或纯文本镜像列表文件路径")
+	fmt.Println("  --dry-run, -dr  仅解析文件并显示镜像，不执行实际推送操作")
 	fmt.Println("")
 	fmt.Println("示例:")
 	fmt.Println("  ./app ship nginx:latest                     # 转存单个镜像")
 	fmt.Println("  ./app ship docker.io/library/nginx:latest   # 转存单个镜像（完整路径）")
 	fmt.Println("  ./app ship -f docker-compose.yaml           # 从docker-compose文件中转存所有镜像")
 	fmt.Println("  ./app ship -f deployment.yaml              # 从Kubernetes deployment文件中转存所有镜像")
+	fmt.Println("  ./app ship -f images.txt                   # 从纯文本镜像列表文件中转存所有镜像")
 	fmt.Println("  ./app ship -f docker-compose.yaml --dry-run  # 仅解析docker-compose文件中的镜像")
+	fmt.Println("  ./app ship -f images.txt -dr                # 同上，短参数写法")
 	fmt.Println("")
 	fmt.Println("环境变量:")
 	fmt.Println("  GITHUB_TOKEN  GitHub访问令牌 (可选，也可在配置文件中设置)")

@@ -42,8 +42,9 @@ func (execCommandRunner) Run(name string, args ...string) error {
 // Run 执行 pull 命令。
 func Run() {
 	fs := flag.NewFlagSet("pull", flag.ExitOnError)
-	filePath := fs.String("f", "", "指定Docker Compose或Kubernetes YAML文件路径")
-	dryRun := fs.Bool("dry-run", false, "仅显示拉取计划，不执行实际拉取操作")
+	filePath := fs.String("f", "", "指定Docker Compose/Kubernetes YAML或纯文本镜像列表文件路径")
+	dryRunFlag := fs.Bool("dry-run", false, "仅显示拉取计划，不执行实际拉取操作")
+	drFlag := fs.Bool("dr", false, "同 --dry-run")
 	podmanFlag := fs.Bool("podman", false, "使用Podman而不是Docker")
 	dockerFlag := fs.Bool("docker", false, "使用Docker（默认）")
 	customRuntime := fs.String("e", "", "使用自定义容器运行时命令")
@@ -59,6 +60,7 @@ func Run() {
 		}
 	}
 	fs.Parse(os.Args[2:])
+	dryRun := *dryRunFlag || *drFlag
 
 	cfg, err := config.LoadPullWithDefaults()
 	if err != nil {
@@ -90,7 +92,7 @@ func Run() {
 		errorCount := 0
 		for i, image := range images {
 			fmt.Printf("\n正在处理镜像 %d/%d: %s\n", i+1, len(images), image)
-			if err := processImage(image, *cfg, containerRuntime, *dryRun, execCommandRunner{}); err != nil {
+			if err := processImage(image, *cfg, containerRuntime, dryRun, execCommandRunner{}); err != nil {
 				fmt.Printf("❌ 处理镜像 %s 失败: %v\n", image, err)
 				errorCount++
 				continue
@@ -98,7 +100,7 @@ func Run() {
 			successCount++
 		}
 
-		if *dryRun {
+		if dryRun {
 			fmt.Println("\n📝 注意: 运行在 dry-run 模式下，未执行实际拉取操作")
 			return
 		}
@@ -115,11 +117,11 @@ func Run() {
 	}
 
 	imageName := fs.Args()[0]
-	if err := processImage(imageName, *cfg, containerRuntime, *dryRun, execCommandRunner{}); err != nil {
+	if err := processImage(imageName, *cfg, containerRuntime, dryRun, execCommandRunner{}); err != nil {
 		fmt.Printf("错误: %v\n", err)
 		os.Exit(1)
 	}
-	if *dryRun {
+	if dryRun {
 		fmt.Println("📝 注意: 运行在 dry-run 模式下，未执行实际拉取操作")
 		return
 	}
@@ -222,11 +224,11 @@ func printUsage() {
 	fmt.Println("")
 	fmt.Println("用法:")
 	fmt.Println("  ./app pull [选项] <镜像名称>")
-	fmt.Println("  ./app pull [选项] -f <docker-compose.yaml或k8s yaml文件路径>")
+	fmt.Println("  ./app pull [选项] -f <docker-compose.yaml/k8s yaml/纯文本镜像列表文件路径>")
 	fmt.Println("")
 	fmt.Println("选项:")
-	fmt.Println("  -f <文件路径>   指定Docker Compose或Kubernetes YAML文件路径")
-	fmt.Println("  --dry-run       显示候选镜像地址，不执行实际拉取")
+	fmt.Println("  -f <文件路径>   指定Docker Compose/Kubernetes YAML或纯文本镜像列表文件路径")
+	fmt.Println("  --dry-run, -dr  显示候选镜像地址，不执行实际拉取")
 	fmt.Println("  --podman        使用Podman而不是Docker")
 	fmt.Println("  --docker        使用Docker（默认）")
 	fmt.Println("  -e <命令>       使用自定义容器运行时命令")
@@ -234,9 +236,11 @@ func printUsage() {
 	fmt.Println("示例:")
 	fmt.Println("  ./app pull postgres:15.19-trixie")
 	fmt.Println("  ./app pull --dry-run postgres:15.19-trixie")
+	fmt.Println("  ./app pull -dr postgres:15.19-trixie")
 	fmt.Println("  ./app pull --podman nginx:latest")
 	fmt.Println("  ./app pull -e 'k3s crictl' nginx:latest")
 	fmt.Println("  ./app pull -f docker-compose.yaml")
+	fmt.Println("  ./app pull -f images.txt")
 	fmt.Println("")
 	fmt.Println("Docker Hub 镜像默认从多个加速站依次拉取，成功后自动恢复原镜像名。")
 }
