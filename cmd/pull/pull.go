@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/keevingness/image-shipper/internal/config"
 	"github.com/keevingness/image-shipper/pkg/docker"
@@ -27,16 +28,89 @@ type pullPlan struct {
 }
 
 type commandRunner interface {
-	Run(name string, args ...string) error
+	// Run 执行命令并返回合并后的标准输出/标准错误
+	Run(name string, args ...string) (string, error)
 }
 
 type execCommandRunner struct{}
 
-func (execCommandRunner) Run(name string, args ...string) error {
-	cmd := exec.Command(name, args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
+func (execCommandRunner) Run(name string, args ...string) (string, error) {
+	out, err := exec.Command(name, args...).CombinedOutput()
+	return string(out), err
+}
+
+var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
+const spinnerInterval = 100 * time.Millisecond
+
+type spinner struct {
+	started time.Time
+	stop    chan struct{}
+	done    chan struct{}
+	active  bool
+}
+
+// startSpinner 启动旋转动画；非终端环境（CI/测试）为空操作
+func startSpinner(prefix string) *spinner {
+	s := &spinner{
+		started: time.Now(),
+		stop:    make(chan struct{}),
+		done:    make(chan struct{}),
+	}
+	if !isTerminal(os.Stdout) {
+		close(s.done)
+		return s
+	}
+	s.active = true
+	go func() {
+		defer close(s.done)
+		ticker := time.NewTicker(spinnerInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-s.stop:
+				return
+			case <-ticker.C:
+				frame := spinnerFrames[int(time.Since(s.started)/spinnerInterval)%len(spinnerFrames)]
+				fmt.Printf("\r\033[K%s %s (%ds)", frame, prefix, int(time.Since(s.started).Seconds()))
+			}
+		}
+	}()
+	return s
+}
+
+// Elapsed 返回自启动以来经过的时间
+func (s *spinner) Elapsed() time.Duration { return time.Since(s.started) }
+
+// Clear 停止动画并清除当前行
+func (s *spinner) Clear() {
+	if !s.active {
+		return
+	}
+	close(s.stop)
+	<-s.done
+	fmt.Print("\r\033[K")
+}
+
+func isTerminal(f *os.File) bool {
+	fi, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return fi.Mode()&os.ModeCharDevice != 0
+}
+
+// lastLines 返回多行文本的最后 n 行，空文本返回空串
+func lastLines(s string, n int) string {
+	s = strings.TrimRight(s, "\n")
+	if s == "" {
+		return ""
+	}
+	lines := strings.Split(s, "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return strings.Join(lines, "\n")
 }
 
 // Run 执行 pull 命令。
@@ -168,36 +242,49 @@ func executePullPlan(plan pullPlan, containerRuntime string, runner commandRunne
 	if len(runtimeParts) == 0 {
 		runtimeParts = []string{"docker"}
 	}
+	tty := isTerminal(os.Stdout)
 
 	var pullErrors []error
 	for i, source := range plan.sources {
-		fmt.Printf("[%d/%d] 执行: %s pull %s\n", i+1, len(plan.sources), containerRuntime, source)
+		step := fmt.Sprintf("[%d/%d]", i+1, len(plan.sources))
+		sp := startSpinner(fmt.Sprintf("%s 正在拉取 %s", step, source))
+		if !tty {
+			fmt.Printf("%s 执行: %s pull %s\n", step, containerRuntime, source)
+		}
 		pullArgs := append(append([]string{}, runtimeParts[1:]...), "pull", source)
-		if err := runner.Run(runtimeParts[0], pullArgs...); err != nil {
+		output, err := runner.Run(runtimeParts[0], pullArgs...)
+		elapsed := sp.Elapsed().Round(time.Second)
+		sp.Clear()
+		if err != nil {
+			fmt.Printf("❌ %s 拉取失败: %s (用时 %s)\n", step, source, elapsed)
+			if tail := lastLines(output, 3); tail != "" {
+				fmt.Printf("   %s\n", strings.ReplaceAll(tail, "\n", "\n   "))
+			}
 			pullErrors = append(pullErrors, fmt.Errorf("%s: %w", source, err))
 			if i < len(plan.sources)-1 {
-				fmt.Println("拉取失败，尝试下一个镜像站...")
+				fmt.Println("↪ 尝试下一个镜像站...")
 			}
 			continue
 		}
 
+		fmt.Printf("✅ %s 拉取成功 (用时 %s): %s\n", step, elapsed, source)
 		if referencesEquivalent(source, plan.target) {
 			return nil
 		}
 
-		fmt.Printf("执行: %s tag %s %s\n", containerRuntime, source, plan.target)
+		fmt.Printf("🔄 %s 重新标记: %s -> %s\n", step, source, plan.target)
 		tagArgs := append(append([]string{}, runtimeParts[1:]...), "tag", source, plan.target)
-		if err := runner.Run(runtimeParts[0], tagArgs...); err != nil {
-			return fmt.Errorf("重新标记镜像失败: %w", err)
+		if _, err := runner.Run(runtimeParts[0], tagArgs...); err != nil {
+			return fmt.Errorf("重新标记镜像 %s 失败: %w", source, err)
 		}
 
-		fmt.Printf("执行: %s rmi %s\n", containerRuntime, source)
 		rmiArgs := append(append([]string{}, runtimeParts[1:]...), "rmi", source)
-		_ = runner.Run(runtimeParts[0], rmiArgs...)
+		_, _ = runner.Run(runtimeParts[0], rmiArgs...)
+		fmt.Printf("🧹 %s 已清理代理标签\n", step)
 		return nil
 	}
 
-	return fmt.Errorf("尝试了 %d 个镜像地址，均拉取失败: %w", len(plan.sources), errors.Join(pullErrors...))
+	return fmt.Errorf("共尝试 %d 个镜像地址，均拉取失败:\n%w", len(plan.sources), errors.Join(pullErrors...))
 }
 
 func referencesEquivalent(source, target string) bool {

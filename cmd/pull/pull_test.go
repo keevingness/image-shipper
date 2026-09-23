@@ -19,9 +19,9 @@ type fakeCommandRunner struct {
 	results map[string]error
 }
 
-func (r *fakeCommandRunner) Run(name string, args ...string) error {
+func (r *fakeCommandRunner) Run(name string, args ...string) (string, error) {
 	r.calls = append(r.calls, commandCall{name: name, args: append([]string(nil), args...)})
-	return r.results[strings.Join(append([]string{name}, args...), " ")]
+	return "", r.results[strings.Join(append([]string{name}, args...), " ")]
 }
 
 func TestBuildPullPlanUsesDefaultDockerHubMirrors(t *testing.T) {
@@ -174,5 +174,19 @@ func TestBuildPullPlanUsesConfiguredRegistry(t *testing.T) {
 	}
 	if !reflect.DeepEqual(plan, want) {
 		t.Fatalf("buildPullPlan() = %#v, want %#v", plan, want)
+	}
+}
+
+func TestLastLines(t *testing.T) {
+	if got := lastLines("", 3); got != "" {
+		t.Errorf("lastLines(空串) = %q, 期望空串", got)
+	}
+	got := lastLines("l1\nl2\nl3\nl4\nl5\n", 2)
+	want := "l4\nl5"
+	if got != want {
+		t.Errorf("lastLines = %q, 期望 %q", got, want)
+	}
+	if got := lastLines("a\nb", 5); got != "a\nb" {
+		t.Errorf("lastLines = %q, 期望保留全部行", got)
 	}
 }
