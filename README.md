@@ -73,6 +73,9 @@ export IMGSHIPPER_GITHUB_WORKFLOW="image-shipper.yaml"  # 默认值
 # 设置后将只使用指定的自定义镜像仓库前缀
 export IMGSHIPPER_PULL_SOURCE_REGISTRY="mirror.example.com/docker"
 export IMGSHIPPER_PULL_CONTAINER_RUNTIME="docker"  # 默认值
+
+# 并发拉取镜像数（默认 1，即顺序拉取；仅对 -f 文件模式生效）
+export IMGSHIPPER_PULL_CONCURRENCY="4"
 ```
 
 ### 配置文件
@@ -133,6 +136,9 @@ pull:
 # 仅显示文件中包含的镜像及候选地址，不执行实际拉取
 ./image-shipper pull --dry-run -f docker-compose.yaml
 ./image-shipper pull --dry-run -f kubernetes-manifest.yaml
+
+# 并发拉取文件中的所有镜像
+IMGSHIPPER_PULL_CONCURRENCY=4 ./image-shipper pull -f images.txt
 ```
 
 默认情况下，Docker Hub 镜像会依次尝试以下地址，首个拉取成功后停止：

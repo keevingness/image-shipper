@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/keevingness/image-shipper/internal/config"
@@ -162,17 +163,7 @@ func Run() {
 			fmt.Printf("%d. %s\n", i+1, image)
 		}
 
-		successCount := 0
-		errorCount := 0
-		for i, image := range images {
-			fmt.Printf("\n正在处理镜像 %d/%d: %s\n", i+1, len(images), image)
-			if err := processImage(image, *cfg, containerRuntime, dryRun, execCommandRunner{}); err != nil {
-				fmt.Printf("❌ 处理镜像 %s 失败: %v\n", image, err)
-				errorCount++
-				continue
-			}
-			successCount++
-		}
+		successCount, errorCount := pullImages(images, *cfg, containerRuntime, dryRun, cfg.Concurrency, execCommandRunner{})
 
 		if dryRun {
 			fmt.Println("\n📝 注意: 运行在 dry-run 模式下，未执行实际拉取操作")
@@ -203,15 +194,70 @@ func Run() {
 }
 
 func processImage(imageName string, cfg config.PullConfig, containerRuntime string, dryRun bool, runner commandRunner) error {
+	return processImageWithLabel(imageName, cfg, containerRuntime, dryRun, "", false, runner)
+}
+
+// processImageWithLabel 处理单个镜像，并发模式下日志带序号前缀
+func processImageWithLabel(imageName string, cfg config.PullConfig, containerRuntime string, dryRun bool, label string, withLabel bool, runner commandRunner) error {
 	plan, err := buildPullPlan(imageName, cfg)
 	if err != nil {
 		return fmt.Errorf("无效的镜像地址 %q: %w", imageName, err)
 	}
 	if dryRun {
+		if withLabel {
+			fmt.Printf("[%s] 镜像: %s\n", label, imageName)
+		}
 		printPullPlan(plan)
 		return nil
 	}
-	return executePullPlan(plan, containerRuntime, runner)
+	if withLabel {
+		return executePullPlan(plan, label, containerRuntime, runner)
+	}
+	return executePullPlan(plan, "", containerRuntime, runner)
+}
+
+// pullImages 按并发数处理镜像列表，返回成功和失败数量
+func pullImages(images []string, cfg config.PullConfig, containerRuntime string, dryRun bool, concurrency int, runner commandRunner) (successCount, errorCount int) {
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	taskCh := make(chan int)
+
+	if concurrency > 1 {
+		fmt.Printf("🚀 并发拉取 %d 个镜像，并发数: %d\n", len(images), concurrency)
+	}
+
+	for w := 0; w < concurrency; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range taskCh {
+				image := images[i]
+				label := fmt.Sprintf("[%d/%d]", i+1, len(images))
+				if concurrency > 1 {
+					fmt.Printf("▶ %s 开始拉取: %s\n", label, image)
+				} else {
+					fmt.Printf("\n正在处理镜像 %d/%d: %s\n", i+1, len(images), image)
+				}
+				if err := processImageWithLabel(image, cfg, containerRuntime, dryRun, label, concurrency > 1, runner); err != nil {
+					fmt.Printf("❌ 处理镜像 %s 失败: %v\n", image, err)
+					mu.Lock()
+					errorCount++
+					mu.Unlock()
+					continue
+				}
+				mu.Lock()
+				successCount++
+				mu.Unlock()
+			}
+		}()
+	}
+
+	for i := range images {
+		taskCh <- i
+	}
+	close(taskCh)
+	wg.Wait()
+	return successCount, errorCount
 }
 
 func buildPullPlan(imageName string, cfg config.PullConfig) (pullPlan, error) {
@@ -237,26 +283,32 @@ func buildPullPlan(imageName string, cfg config.PullConfig) (pullPlan, error) {
 	return plan, nil
 }
 
-func executePullPlan(plan pullPlan, containerRuntime string, runner commandRunner) error {
+func executePullPlan(plan pullPlan, label string, containerRuntime string, runner commandRunner) error {
 	runtimeParts := strings.Fields(containerRuntime)
 	if len(runtimeParts) == 0 {
 		runtimeParts = []string{"docker"}
 	}
 	tty := isTerminal(os.Stdout)
 
+	step := func(i int) string {
+		if label != "" {
+			return fmt.Sprintf("%s [%d/%d]", label, i+1, len(plan.sources))
+		}
+		return fmt.Sprintf("[%d/%d]", i+1, len(plan.sources))
+	}
+
 	var pullErrors []error
 	for i, source := range plan.sources {
-		step := fmt.Sprintf("[%d/%d]", i+1, len(plan.sources))
-		sp := startSpinner(fmt.Sprintf("%s 正在拉取 %s", step, source))
+		sp := startSpinner(fmt.Sprintf("%s 正在拉取 %s", step(i), source))
 		if !tty {
-			fmt.Printf("%s 执行: %s pull %s\n", step, containerRuntime, source)
+			fmt.Printf("%s 执行: %s pull %s\n", step(i), containerRuntime, source)
 		}
 		pullArgs := append(append([]string{}, runtimeParts[1:]...), "pull", source)
 		output, err := runner.Run(runtimeParts[0], pullArgs...)
 		elapsed := sp.Elapsed().Round(time.Second)
 		sp.Clear()
 		if err != nil {
-			fmt.Printf("❌ %s 拉取失败: %s (用时 %s)\n", step, source, elapsed)
+			fmt.Printf("❌ %s 拉取失败: %s (用时 %s)\n", step(i), source, elapsed)
 			if tail := lastLines(output, 3); tail != "" {
 				fmt.Printf("   %s\n", strings.ReplaceAll(tail, "\n", "\n   "))
 			}
@@ -267,12 +319,12 @@ func executePullPlan(plan pullPlan, containerRuntime string, runner commandRunne
 			continue
 		}
 
-		fmt.Printf("✅ %s 拉取成功 (用时 %s): %s\n", step, elapsed, source)
+		fmt.Printf("✅ %s 拉取成功 (用时 %s): %s\n", step(i), elapsed, source)
 		if referencesEquivalent(source, plan.target) {
 			return nil
 		}
 
-		fmt.Printf("🔄 %s 重新标记: %s -> %s\n", step, source, plan.target)
+		fmt.Printf("🔄 %s 重新标记: %s -> %s\n", step(i), source, plan.target)
 		tagArgs := append(append([]string{}, runtimeParts[1:]...), "tag", source, plan.target)
 		if _, err := runner.Run(runtimeParts[0], tagArgs...); err != nil {
 			return fmt.Errorf("重新标记镜像 %s 失败: %w", source, err)
@@ -280,7 +332,7 @@ func executePullPlan(plan pullPlan, containerRuntime string, runner commandRunne
 
 		rmiArgs := append(append([]string{}, runtimeParts[1:]...), "rmi", source)
 		_, _ = runner.Run(runtimeParts[0], rmiArgs...)
-		fmt.Printf("🧹 %s 已清理代理标签\n", step)
+		fmt.Printf("🧹 %s 已清理代理标签\n", step(i))
 		return nil
 	}
 
@@ -330,4 +382,5 @@ func printUsage() {
 	fmt.Println("  ./app pull -f images.txt")
 	fmt.Println("")
 	fmt.Println("Docker Hub 镜像默认从多个加速站依次拉取，成功后自动恢复原镜像名。")
+	fmt.Println("设置 IMGSHIPPER_PULL_CONCURRENCY 可并发拉取多个镜像（默认 1，仅对 -f 文件模式生效）。")
 }

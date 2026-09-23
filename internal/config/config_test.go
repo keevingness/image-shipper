@@ -37,3 +37,31 @@ func TestLoadPullWithDefaultsPreservesConfiguredRegistry(t *testing.T) {
 		t.Fatalf("ContainerRuntime = %q, want podman", cfg.ContainerRuntime)
 	}
 }
+
+func TestLoadPullWithDefaultsConcurrency(t *testing.T) {
+	t.Setenv("IMGSHIPPER_PULL_CONCURRENCY", "")
+
+	cfg, err := LoadPullWithDefaults()
+	if err != nil {
+		t.Fatalf("默认并发数加载失败: %v", err)
+	}
+	if cfg.Concurrency != 1 {
+		t.Fatalf("默认 Concurrency = %d, 期望 1", cfg.Concurrency)
+	}
+
+	t.Setenv("IMGSHIPPER_PULL_CONCURRENCY", "4")
+	cfg, err = LoadPullWithDefaults()
+	if err != nil {
+		t.Fatalf("并发数=4 加载失败: %v", err)
+	}
+	if cfg.Concurrency != 4 {
+		t.Fatalf("Concurrency = %d, 期望 4", cfg.Concurrency)
+	}
+
+	for _, bad := range []string{"0", "-1", "abc"} {
+		t.Setenv("IMGSHIPPER_PULL_CONCURRENCY", bad)
+		if _, err := LoadPullWithDefaults(); err == nil {
+			t.Errorf("Concurrency=%q 应当报错", bad)
+		}
+	}
+}

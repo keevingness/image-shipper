@@ -4,6 +4,7 @@ import (
 	"errors"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/keevingness/image-shipper/internal/config"
@@ -51,7 +52,7 @@ func TestExecutePullPlanFallsBackAndRetags(t *testing.T) {
 	plan := pullPlan{target: "postgres:15", sources: []string{first, second}}
 	runner := &fakeCommandRunner{results: map[string]error{"docker pull " + first: errors.New("unavailable")}}
 
-	if err := executePullPlan(plan, "docker", runner); err != nil {
+	if err := executePullPlan(plan, "", "docker", runner); err != nil {
 		t.Fatalf("executePullPlan() error = %v", err)
 	}
 
@@ -73,7 +74,7 @@ func TestExecutePullPlanDoesNotRetagEquivalentDockerHubReference(t *testing.T) {
 	}
 	runner := &fakeCommandRunner{results: map[string]error{}}
 
-	if err := executePullPlan(plan, "docker", runner); err != nil {
+	if err := executePullPlan(plan, "", "docker", runner); err != nil {
 		t.Fatalf("executePullPlan() error = %v", err)
 	}
 
@@ -94,7 +95,7 @@ func TestExecutePullPlanReturnsErrorWhenAllMirrorsFail(t *testing.T) {
 		"docker pull " + second: errors.New("second unavailable"),
 	}}
 
-	err := executePullPlan(plan, "docker", runner)
+	err := executePullPlan(plan, "", "docker", runner)
 	if err == nil {
 		t.Fatal("executePullPlan() error = nil")
 	}
@@ -119,7 +120,7 @@ func TestExecutePullPlanStopsWhenTagFails(t *testing.T) {
 		"docker tag " + first + " postgres:15": errors.New("tag failed"),
 	}}
 
-	if err := executePullPlan(plan, "docker", runner); err == nil {
+	if err := executePullPlan(plan, "", "docker", runner); err == nil {
 		t.Fatal("executePullPlan() error = nil")
 	}
 
@@ -152,7 +153,7 @@ func TestExecutePullPlanPullsOtherRegistryWithoutRetagging(t *testing.T) {
 	plan := pullPlan{target: image, sources: []string{image}}
 	runner := &fakeCommandRunner{results: map[string]error{}}
 
-	if err := executePullPlan(plan, "docker", runner); err != nil {
+	if err := executePullPlan(plan, "", "docker", runner); err != nil {
 		t.Fatalf("executePullPlan() error = %v", err)
 	}
 
@@ -189,4 +190,58 @@ func TestLastLines(t *testing.T) {
 	if got := lastLines("a\nb", 5); got != "a\nb" {
 		t.Errorf("lastLines = %q, 期望保留全部行", got)
 	}
+}
+
+func TestPullImagesConcurrent(t *testing.T) {
+	images := []string{"a:1", "b:1", "c:1", "d:1"}
+
+	// runner 会阻塞直到同时有 expected 个任务在执行，以验证真实并发且不超过限制
+	runner := newGatedRunner(2)
+
+	successCount, errorCount := pullImages(images, config.PullConfig{Concurrency: 2}, "docker", false, 2, runner)
+	if successCount != len(images) || errorCount != 0 {
+		t.Fatalf("success=%d error=%d, want %d/0", successCount, errorCount, len(images))
+	}
+	if max := runner.maxInFlight(); max != 2 {
+		t.Fatalf("最大并发 = %d, 期望正好 2", max)
+	}
+}
+
+type gatedRunner struct {
+	mu          sync.Mutex
+	inFlight    int
+	maxSeen     int
+	expected    int
+	reached     chan struct{}
+	reachedOnce bool
+}
+
+func newGatedRunner(expected int) *gatedRunner {
+	return &gatedRunner{expected: expected, reached: make(chan struct{})}
+}
+
+func (r *gatedRunner) maxInFlight() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.maxSeen
+}
+
+func (r *gatedRunner) Run(name string, args ...string) (string, error) {
+	r.mu.Lock()
+	r.inFlight++
+	if r.inFlight > r.maxSeen {
+		r.maxSeen = r.inFlight
+	}
+	if r.inFlight >= r.expected && !r.reachedOnce {
+		r.reachedOnce = true
+		close(r.reached)
+	}
+	r.mu.Unlock()
+
+	<-r.reached // 等待并发度达到 expected 后才放行，保证确定性
+
+	r.mu.Lock()
+	r.inFlight--
+	r.mu.Unlock()
+	return "", nil
 }

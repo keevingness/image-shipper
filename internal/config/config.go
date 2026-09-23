@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -24,6 +25,7 @@ type GitHubConfig struct {
 type PullConfig struct {
 	SourceRegistry    string `mapstructure:"source_registry"`
 	ContainerRuntime  string `mapstructure:"container_runtime"`
+	Concurrency       int    `mapstructure:"concurrency"`
 	UseDefaultMirrors bool   `mapstructure:"-"`
 }
 
@@ -31,6 +33,7 @@ type PullConfig struct {
 func LoadPullWithDefaults() (*PullConfig, error) {
 	config := &PullConfig{
 		ContainerRuntime:  "docker",
+		Concurrency:       1,
 		UseDefaultMirrors: true,
 	}
 
@@ -40,6 +43,13 @@ func LoadPullWithDefaults() (*PullConfig, error) {
 	}
 	if containerRuntime := strings.TrimSpace(os.Getenv("IMGSHIPPER_PULL_CONTAINER_RUNTIME")); containerRuntime != "" {
 		config.ContainerRuntime = containerRuntime
+	}
+	if v := strings.TrimSpace(os.Getenv("IMGSHIPPER_PULL_CONCURRENCY")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			return nil, fmt.Errorf("IMGSHIPPER_PULL_CONCURRENCY 必须为正整数, 当前值: %q", v)
+		}
+		config.Concurrency = n
 	}
 
 	return config, nil
