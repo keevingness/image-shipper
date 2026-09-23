@@ -49,13 +49,24 @@ func (c *Client) TriggerMirrorWorkflow(sourceImage, targetRegistry string) (*typ
 		"docker_image": sourceImage,
 	}
 
+	// 获取仓库默认分支，避免硬编码分支名
+	repoInfo, _, err := c.client.Repositories.Get(context.Background(), c.owner, c.repo)
+	if err != nil {
+		c.logger.Error("Failed to get repo default branch", zap.Error(err))
+		return nil, fmt.Errorf("failed to get repo default branch: %w", err)
+	}
+	ref := repoInfo.GetDefaultBranch()
+	if ref == "" {
+		ref = "main"
+	}
+
 	// 触发工作流
 	event := github.CreateWorkflowDispatchEventRequest{
-		Ref:    "main",
+		Ref:    ref,
 		Inputs: inputs,
 	}
 
-	_, err := c.client.Actions.CreateWorkflowDispatchEventByFileName(
+	_, err = c.client.Actions.CreateWorkflowDispatchEventByFileName(
 		context.Background(),
 		c.owner,
 		c.repo,
