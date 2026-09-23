@@ -15,7 +15,6 @@ env:
     ALIYUN_REGISTRY_PASSWORD: "${{ secrets.ALIYUN_REGISTRY_PASSWORD }}"
     HUAWEI_AK: "${{ secrets.HW_AK }}"
     HUAWEI_SK: "${{ secrets.HW_SK }}"
-    HUAWEI_PROJECT_ID: "${{ secrets.HUAWEI_PROJECT_ID }}"
     HUAWEI_REGION: "${{ secrets.HUAWEI_REGION }}"
 
 jobs:
@@ -107,38 +106,7 @@ jobs:
 
             - name: Set SWR repository public
               run: |
-                  set -uo pipefail
-
-                  # 仓库名中如带 /，需先替换为 $ 再请求（SWR 文档要求）
-                  REPO_PARAM="${REPO_NAME//\//\$}"
-
-                  HOST="swr-api.${HUAWEI_REGION}.myhuaweicloud.com"
-                  URI="/v2/manage/namespaces/${ALIYUN_NAME_SPACE}/repos/${REPO_PARAM}"
-                  BODY='{"is_public": true, "description": "public"}'
-                  SDK_DATE=$(date -u +%Y%m%dT%H%M%SZ)
-
-                  # 1. 华为云 SDK-HMAC-SHA256 请求签名（直接用 AK/SK，无需 Token）
-                  hash_hex() { printf '%s' "$1" | openssl dgst -sha256 -hex | awk '{print $NF}'; }
-
-                  BODY_HASH=$(hash_hex "$BODY")
-                  CANON_HEADERS=$(printf 'content-type:%s\nhost:%s\nx-sdk-date:%s\n' "application/json" "$HOST" "$SDK_DATE")
-                  SIGNED="content-type;host;x-sdk-date"
-                  CANON_REQ=$(printf 'PATCH\n%s\n\n%s\n%s\n%s' "$URI" "$CANON_HEADERS" "$SIGNED" "$BODY_HASH")
-                  STS=$(printf 'SDK-HMAC-SHA256\n%s\n%s' "$SDK_DATE" "$(hash_hex "$CANON_REQ")")
-                  SIGNATURE=$(printf '%s' "$STS" | openssl dgst -sha256 -hmac "$HUAWEI_SK" -hex | awk '{print $NF}')
-
-                  # 2. 调用 UpdateRepo 将仓库设置为公开，成功返回 201
-                  STATUS=$(curl -sS -o /tmp/resp.txt -w '%{http_code}' -X PATCH \
-                      "https://${HOST}${URI}" \
-                      -H "Content-Type: application/json" \
-                      -H "X-Sdk-Date: ${SDK_DATE}" \
-                      -H "Authorization: SDK-HMAC-SHA256 Access=${HUAWEI_AK}, SignedHeaders=${SIGNED}, Signature=${SIGNATURE}" \
-                      -d "$BODY")
-
-                  echo "HTTP status: $STATUS"
-                  if [ "$STATUS" = "201" ]; then
-                      echo "✅ ${ALIYUN_NAME_SPACE}/${REPO_NAME} 已设置为公开"
-                  else
-                      cat /tmp/resp.txt || true
-                      exit 1
-                  fi
+                  python3 scripts/swr_set_public.py \
+                      --region "$HUAWEI_REGION" \
+                      --namespace "$ALIYUN_NAME_SPACE" \
+                      --repository "$REPO_NAME"
