@@ -11,6 +11,12 @@ import (
 type Config struct {
 	GitHub GitHubConfig `mapstructure:"github"`
 	Pull   PullConfig   `mapstructure:"pull"`
+	Ship   ShipConfig   `mapstructure:"ship"`
+}
+
+// ShipConfig Ship命令配置
+type ShipConfig struct {
+	Concurrency int `mapstructure:"concurrency"`
 }
 
 // GitHubConfig GitHub相关配置
@@ -57,7 +63,9 @@ func LoadPullWithDefaults() (*PullConfig, error) {
 
 // LoadWithDefaults 从环境变量加载配置
 func LoadWithDefaults() (*Config, error) {
-	config := &Config{}
+	config := &Config{
+		Ship: ShipConfig{Concurrency: 1},
+	}
 
 	// 直接从环境变量读取GitHub Token
 	if token := os.Getenv("IMGSHIPPER_GITHUB_TOKEN"); token != "" {
@@ -84,6 +92,15 @@ func LoadWithDefaults() (*Config, error) {
 
 	if containerRuntime := os.Getenv("IMGSHIPPER_PULL_CONTAINER_RUNTIME"); containerRuntime != "" {
 		config.Pull.ContainerRuntime = containerRuntime
+	}
+
+	// Ship 并发配置
+	if v := strings.TrimSpace(os.Getenv("IMGSHIPPER_SHIP_CONCURRENCY")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			return nil, fmt.Errorf("IMGSHIPPER_SHIP_CONCURRENCY 必须为正整数, 当前值: %q", v)
+		}
+		config.Ship.Concurrency = n
 	}
 
 	// 设置默认值（只有在环境变量未设置时才应用）

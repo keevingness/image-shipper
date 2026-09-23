@@ -65,3 +65,24 @@ func TestLoadPullWithDefaultsConcurrency(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadWithDefaultsShipConcurrency(t *testing.T) {
+	t.Setenv("TEST_ENV", "true")
+	t.Setenv("IMGSHIPPER_SHIP_CONCURRENCY", "")
+
+	t.Setenv("IMGSHIPPER_SHIP_CONCURRENCY", "3")
+	cfg, err := LoadWithDefaults()
+	if err != nil {
+		t.Fatalf("加载失败: %v", err)
+	}
+	if cfg.Ship.Concurrency != 3 {
+		t.Fatalf("Ship.Concurrency = %d, 期望 3", cfg.Ship.Concurrency)
+	}
+
+	for _, bad := range []string{"0", "-2", "x"} {
+		t.Setenv("IMGSHIPPER_SHIP_CONCURRENCY", bad)
+		if _, err := LoadWithDefaults(); err == nil {
+			t.Errorf("IMGSHIPPER_SHIP_CONCURRENCY=%q 应当报错", bad)
+		}
+	}
+}

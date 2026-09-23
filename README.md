@@ -76,6 +76,9 @@ export IMGSHIPPER_PULL_CONTAINER_RUNTIME="docker"  # 默认值
 
 # 并发拉取镜像数（默认 1，即顺序拉取；仅对 -f 文件模式生效）
 export IMGSHIPPER_PULL_CONCURRENCY="4"
+
+# 并发转存镜像数（默认 1，即顺序转存；仅对 -f 文件模式生效）
+export IMGSHIPPER_SHIP_CONCURRENCY="4"
 ```
 
 ### 配置文件
@@ -139,6 +142,9 @@ pull:
 
 # 并发拉取文件中的所有镜像
 IMGSHIPPER_PULL_CONCURRENCY=4 ./image-shipper pull -f images.txt
+
+# 并发转存文件中的所有镜像
+IMGSHIPPER_SHIP_CONCURRENCY=4 ./image-shipper ship -f images.txt
 ```
 
 默认情况下，Docker Hub 镜像会依次尝试以下地址，首个拉取成功后停止：

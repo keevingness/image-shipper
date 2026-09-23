@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -81,14 +82,9 @@ func Run() {
 		// 设置信号处理
 		sigChan := make(chan os.Signal, 1)
 		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-		
-		// 逐个处理镜像
-		for i, image := range images {
-			fmt.Printf("\n正在处理镜像 %d/%d: %s\n", i+1, len(images), image)
-			shipSingleImage(image, githubClient, logger, sigChan)
-		}
-		
-		fmt.Println("\n✅ 所有镜像处理完成!")
+
+		// 按并发数处理镜像
+		shipImages(images, githubClient, logger, sigChan, cfg.Ship.Concurrency)
 		return
 	}
 	
@@ -139,22 +135,85 @@ func Run() {
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	
 	// 触发单个镜像的工作流
-	shipSingleImage(imageURL, githubClient, logger, sigChan)
+	if err := shipSingleImage("", imageURL, githubClient, logger, sigChan, false); err != nil {
+		fmt.Printf("错误: %v\n", err)
+		os.Exit(1)
+	}
 	return
 }
 
-// shipSingleImage 处理单个镜像的转存
-func shipSingleImage(imageURL string, githubClient *github.Client, logger *zap.Logger, sigChan chan os.Signal) {
-	// 触发工作流
-	fmt.Printf("正在触发镜像转存工作流: %s\n", imageURL)
-	request, err := githubClient.TriggerMirrorWorkflow(imageURL, "")
-	if err != nil {
-		fmt.Printf("触发工作流失败: %v\n", err)
-		os.Exit(1)
+func shipImages(images []string, githubClient *github.Client, logger *zap.Logger, sigChan chan os.Signal, concurrency int) {
+	if concurrency > len(images) {
+		concurrency = len(images)
+	}
+	concurrent := concurrency > 1
+	if concurrent {
+		fmt.Printf("🚀 并发转存 %d 个镜像，并发数: %d\n", len(images), concurrency)
 	}
 
-	fmt.Printf("工作流已触发，请求ID: %s\n", request.ID)
-	fmt.Println("正在等待工作流执行完成...")
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	taskCh := make(chan int)
+	successCount, errorCount := 0, 0
+
+	for w := 0; w < concurrency; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range taskCh {
+				image := images[i]
+				label := fmt.Sprintf("[%d/%d]", i+1, len(images))
+				if concurrent {
+					fmt.Printf("▶ %s 开始转存: %s\n", label, image)
+				} else {
+					fmt.Printf("\n正在处理镜像 %d/%d: %s\n", i+1, len(images), image)
+				}
+				if err := shipSingleImage(label, image, githubClient, logger, sigChan, concurrent); err != nil {
+					fmt.Printf("❌ 处理镜像 %s 失败: %v\n", image, err)
+					mu.Lock()
+					errorCount++
+					mu.Unlock()
+					continue
+				}
+				mu.Lock()
+				successCount++
+				mu.Unlock()
+			}
+		}()
+	}
+
+	for i := range images {
+		taskCh <- i
+	}
+	close(taskCh)
+	wg.Wait()
+
+	fmt.Printf("\n📊 总结: 成功转存 %d 个镜像，失败 %d 个镜像\n", successCount, errorCount)
+	if errorCount > 0 {
+		os.Exit(1)
+	}
+}
+
+// shipSingleImage 处理单个镜像的转存
+// label 为序号前缀（如 "[1/8]"），concurrent 为 true 时禁用单行动画并按行输出状态变化
+func shipSingleImage(label string, imageURL string, githubClient *github.Client, logger *zap.Logger, sigChan chan os.Signal, concurrent bool) error {
+	prefix := ""
+	if label != "" {
+		prefix = label + " "
+	}
+	// 触发工作流
+	fmt.Printf("%s正在触发镜像转存工作流: %s\n", prefix, imageURL)
+	request, err := githubClient.TriggerMirrorWorkflow(imageURL, "")
+	if err != nil {
+		return fmt.Errorf("触发工作流失败: %w", err)
+	}
+
+	if concurrent {
+		fmt.Printf("%s工作流已触发 (ID: %s)，等待执行完成...\n", prefix, request.ID)
+	} else {
+		fmt.Printf("工作流已触发，请求ID: %s\n", request.ID)
+		fmt.Println("正在等待工作流执行完成...")
+	}
 
 	// 轮询工作流状态
 	ticker := time.NewTicker(10 * time.Second)
@@ -174,12 +233,17 @@ func shipSingleImage(imageURL string, githubClient *github.Client, logger *zap.L
 	currentStatus := "in_progress"
 	currentConclusion := "unknown"
 
-	// 初始状态显示
-	fmt.Printf("\r工作流状态: %s %s, 结论: %s", spinners[0], currentStatus, currentConclusion)
+	// 初始状态显示（仅顺序模式，并发模式下各行会交错，不使用单行动画）
+	if !concurrent {
+		fmt.Printf("\r工作流状态: %s %s, 结论: %s", spinners[0], currentStatus, currentConclusion)
+	}
 
 	for {
 		select {
 		case <-spinnerTicker.C:
+			if concurrent {
+				continue
+			}
 			// 更新进度指示器
 			spinnerIndex = (spinnerIndex + 1) % len(spinners)
 			fmt.Printf("\r工作流状态: %s %s, 结论: %s", spinners[spinnerIndex], currentStatus, currentConclusion)
@@ -195,22 +259,26 @@ func shipSingleImage(imageURL string, githubClient *github.Client, logger *zap.L
 			}
 
 			// 更新状态信息
+			if concurrent && (response.Status != currentStatus || response.Conclusion != currentConclusion) {
+				fmt.Printf("ℹ️ %s%s 状态: %s\n", prefix, imageURL, response.Status)
+			}
 			currentStatus = response.Status
 			currentConclusion = response.Conclusion
 
 			// 检查工作流是否完成
 			if response.Status == "completed" {
-				// 清除当前行并显示最终结果
-				fmt.Printf("\r")
-				if response.Conclusion == "success" {
-					fmt.Println("✅ 镜像转存成功!")
-					fmt.Printf("工作流详情: %s\n", response.URL)
-					return
-				} else {
-					fmt.Printf("❌ 镜像转存失败: %s\n", response.Conclusion)
-					fmt.Printf("工作流详情: %s\n", response.URL)
-					os.Exit(1)
+				if !concurrent {
+					// 清除当前行
+					fmt.Printf("\r")
 				}
+				if response.Conclusion == "success" {
+					fmt.Printf("✅ %s镜像转存成功!\n", prefix)
+					fmt.Printf("工作流详情: %s\n", response.URL)
+					return nil
+				}
+				fmt.Printf("❌ %s镜像转存失败: %s\n", prefix, response.Conclusion)
+				fmt.Printf("工作流详情: %s\n", response.URL)
+				return fmt.Errorf("镜像转存失败: %s", response.Conclusion)
 			}
 
 		case <-sigChan:
@@ -219,9 +287,10 @@ func shipSingleImage(imageURL string, githubClient *github.Client, logger *zap.L
 			os.Exit(1)
 
 		case <-timeout:
-			fmt.Printf("\r")
-			fmt.Println("⏰ 等待工作流完成超时")
-			os.Exit(1)
+			if !concurrent {
+				fmt.Printf("\r")
+			}
+			return fmt.Errorf("等待工作流完成超时 (30分钟)")
 		}
 	}
 }
@@ -250,14 +319,9 @@ func shipImagesFromFile(filePath string, githubClient *github.Client, logger *za
 	// 设置信号处理
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-	
-	// 逐个处理镜像
-	for i, image := range images {
-		fmt.Printf("\n正在处理镜像 %d/%d: %s\n", i+1, len(images), image)
-		shipSingleImage(image, githubClient, logger, sigChan)
-	}
-	
-	fmt.Println("\n✅ 所有镜像处理完成!")
+
+	// 按顺序处理镜像
+	shipImages(images, githubClient, logger, sigChan, 1)
 }
 
 // initLogger 初始化日志记录器
@@ -295,4 +359,5 @@ func printUsage() {
 	fmt.Println("")
 	fmt.Println("环境变量:")
 	fmt.Println("  GITHUB_TOKEN  GitHub访问令牌 (可选，也可在配置文件中设置)")
+	fmt.Println("  IMGSHIPPER_SHIP_CONCURRENCY  并发转存镜像数（默认 1，仅对 -f 文件模式生效）")
 }
