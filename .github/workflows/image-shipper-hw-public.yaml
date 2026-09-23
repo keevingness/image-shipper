@@ -109,37 +109,31 @@ jobs:
               run: |
                   set -uo pipefail
 
-                  # 1. 用 AK/SK 换取 IAM Token（hw_authkey 方式）
-                  PAYLOAD=$(jq -n \
-                      --arg ak "$HUAWEI_AK" \
-                      --arg sk "$HUAWEI_SK" \
-                      --arg pid "$HUAWEI_PROJECT_ID" \
-                      '{auth:{identity:{methods:["hw_authkey"],hw_authkey:{access:$ak,secret:$sk}},scope:{project:{id:$pid}}}}')
-
-                  RESP_HEADERS=$(mktemp)
-                  TOKEN_RESP=$(mktemp)
-                  HTTP_CODE=$(curl -sS -o "$TOKEN_RESP" -w '%{http_code}' \
-                      -X POST "https://iam.${HUAWEI_REGION}.myhuaweicloud.com/v3/auth/tokens" \
-                      -H "Content-Type: application/json" \
-                      -d "$PAYLOAD" \
-                      -D "$RESP_HEADERS") || HTTP_CODE="curl失败"
-
-                  TOKEN=$(grep -i '^X-Subject-Token:' "$RESP_HEADERS" | sed 's/^[^:]*: *//' | tr -d '\r' || true)
-                  if [ -z "$TOKEN" ]; then
-                      echo "获取 Token 失败 (HTTP $HTTP_CODE)，响应体："
-                      cat "$TOKEN_RESP" || true
-                      exit 1
-                  fi
-
-                  # 2. 仓库名中如带 /，需先替换为 $ 再请求（SWR 文档要求）
+                  # 仓库名中如带 /，需先替换为 $ 再请求（SWR 文档要求）
                   REPO_PARAM="${REPO_NAME//\//\$}"
 
-                  # 3. 调用 UpdateRepo 将仓库设置为公开，成功返回 201
+                  HOST="swr-api.${HUAWEI_REGION}.myhuaweicloud.com"
+                  URI="/v2/manage/namespaces/${ALIYUN_NAME_SPACE}/repos/${REPO_PARAM}"
+                  BODY='{"is_public": true, "description": "public"}'
+                  SDK_DATE=$(date -u +%Y%m%dT%H%M%SZ)
+
+                  # 1. 华为云 SDK-HMAC-SHA256 请求签名（直接用 AK/SK，无需 Token）
+                  hash_hex() { printf '%s' "$1" | openssl dgst -sha256 -hex | awk '{print $NF}'; }
+
+                  BODY_HASH=$(hash_hex "$BODY")
+                  CANON_HEADERS=$(printf 'content-type:%s\nhost:%s\nx-sdk-date:%s\n' "application/json" "$HOST" "$SDK_DATE")
+                  SIGNED="content-type;host;x-sdk-date"
+                  CANON_REQ=$(printf 'PATCH\n%s\n\n%s\n%s\n%s' "$URI" "$CANON_HEADERS" "$SIGNED" "$BODY_HASH")
+                  STS=$(printf 'SDK-HMAC-SHA256\n%s\n%s' "$SDK_DATE" "$(hash_hex "$CANON_REQ")")
+                  SIGNATURE=$(printf '%s' "$STS" | openssl dgst -sha256 -hmac "$HUAWEI_SK" -hex | awk '{print $NF}')
+
+                  # 2. 调用 UpdateRepo 将仓库设置为公开，成功返回 201
                   STATUS=$(curl -sS -o /tmp/resp.txt -w '%{http_code}' -X PATCH \
-                      "https://swr-api.${HUAWEI_REGION}.myhuaweicloud.com/v2/manage/namespaces/${ALIYUN_NAME_SPACE}/repos/${REPO_PARAM}" \
+                      "https://${HOST}${URI}" \
                       -H "Content-Type: application/json" \
-                      -H "X-Auth-Token: ${TOKEN}" \
-                      -d '{"is_public": true, "description": "public"}')
+                      -H "X-Sdk-Date: ${SDK_DATE}" \
+                      -H "Authorization: SDK-HMAC-SHA256 Access=${HUAWEI_AK}, SignedHeaders=${SIGNED}, Signature=${SIGNATURE}" \
+                      -d "$BODY")
 
                   echo "HTTP status: $STATUS"
                   if [ "$STATUS" = "201" ]; then
