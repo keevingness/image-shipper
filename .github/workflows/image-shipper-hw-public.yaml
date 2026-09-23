@@ -1,0 +1,144 @@
+name: Docker Simple Push
+
+on:
+    workflow_dispatch:
+        inputs:
+            docker_image:
+                description: "要转存的 Docker 镜像地址"
+                required: true
+                default: "nginx:latest"
+
+env:
+    ALIYUN_REGISTRY: "${{ secrets.ALIYUN_REGISTRY }}"
+    ALIYUN_NAME_SPACE: "${{ secrets.ALIYUN_NAME_SPACE }}"
+    ALIYUN_REGISTRY_USER: "${{ secrets.ALIYUN_REGISTRY_USER }}"
+    ALIYUN_REGISTRY_PASSWORD: "${{ secrets.ALIYUN_REGISTRY_PASSWORD }}"
+    HUAWEI_AK: "${{ secrets.HW_AK }}"
+    HUAWEI_SK: "${{ secrets.HW_SK }}"
+    HUAWEI_PROJECT_ID: "${{ secrets.HUAWEI_PROJECT_ID }}"
+    HUAWEI_REGION: "${{ secrets.HUAWEI_REGION }}"
+
+jobs:
+    build:
+        name: Pull and Push
+        runs-on: ubuntu-latest
+        steps:
+            - name: Before freeing up disk space
+              run: |
+                  echo "Before freeing up disk space"
+                  echo "=============================================================================="
+                  df -hT
+                  echo "=============================================================================="
+
+            - name: Restart docker
+              run: sudo service docker restart
+
+            - name: Free up disk space complete
+              run: |
+                  echo "Free up disk space complete"
+                  echo "=============================================================================="
+                  df -hT
+                  echo "=============================================================================="
+
+            - name: Checkout Code
+              uses: actions/checkout@v4
+
+            - name: Docker Setup Buildx
+              uses: docker/setup-buildx-action@v3
+
+            - name: Build and push image
+              run: |
+                  # 登录目标仓库
+                  docker login -u $ALIYUN_REGISTRY_USER -p $ALIYUN_REGISTRY_PASSWORD $ALIYUN_REGISTRY
+
+                  # 获取输入的镜像地址
+                  DOCKER_IMAGE="${{ github.event.inputs.docker_image }}"
+                  echo "Source image: $DOCKER_IMAGE"
+
+                  # 拉取镜像
+                  echo "Pulling image: $DOCKER_IMAGE"
+                  docker pull $DOCKER_IMAGE
+
+                  # 检查是否包含平台信息
+                  platform=$(echo "$DOCKER_IMAGE" | awk -F'--platform[ =]' '{if (NF>1) print $2}' | awk '{print $1}')
+                  echo "platform is $platform"
+
+                  # 如果存在架构信息 将架构信息拼到镜像名称前面
+                  if [ -z "$platform" ]; then
+                      platform_prefix=""
+                  else
+                      platform_prefix="${platform//\//_}_"
+                  fi
+                  echo "platform_prefix is $platform_prefix"
+
+                  # 获取镜像的完整名称
+                  image=$(echo "$DOCKER_IMAGE" | awk '{print $NF}')
+
+                  # 获取镜像名称和标签，保留原始输入格式
+                  image_name_tag="${image%%@*}"
+                  echo "image_name_tag: $image_name_tag"
+
+                  # 构建新镜像名称，直接使用原始输入
+                  new_image="$ALIYUN_REGISTRY/$ALIYUN_NAME_SPACE/$platform_prefix$image_name_tag"
+                  echo "New image: $new_image"
+
+                  # 计算仓库 repository 名称（去掉 tag，供后续设置公开使用）
+                  repo_name="$platform_prefix${image_name_tag%:*}"
+                  echo "Repo name: $ALIYUN_NAME_SPACE/$repo_name"
+                  echo "REPO_NAME=$repo_name" >> "$GITHUB_ENV"
+
+                  # 标记并推送镜像
+                  echo "Tagging image: $image -> $new_image"
+                  docker tag $image $new_image
+                  echo "Pushing image: $new_image"
+                  docker push $new_image
+
+                  # 清理镜像
+                  echo "开始清理磁盘空间"
+                  echo "=============================================================================="
+                  df -hT
+                  echo "=============================================================================="
+                  docker rmi $image
+                  docker rmi $new_image
+                  echo "磁盘空间清理完毕"
+                  echo "=============================================================================="
+                  df -hT
+                  echo "=============================================================================="
+
+            - name: Set SWR repository public
+              run: |
+                  set -uo pipefail
+
+                  # 1. 用 AK/SK 换取 IAM Token（hw_authkey 方式）
+                  PAYLOAD=$(jq -n \
+                      --arg ak "$HUAWEI_AK" \
+                      --arg sk "$HUAWEI_SK" \
+                      --arg pid "$HUAWEI_PROJECT_ID" \
+                      '{auth:{identity:{methods:["hw_authkey"],hw_authkey:{access:$ak,secret:$sk}},scope:{project:{id:$pid}}}}')
+
+                  RESP_HEADERS=$(mktemp)
+                  curl -sS -X POST "https://iam.${HUAWEI_REGION}.myhuaweicloud.com/v3/auth/tokens" \
+                      -H "Content-Type: application/json" \
+                      -d "$PAYLOAD" \
+                      -D "$RESP_HEADERS" -o /dev/null || true
+
+                  TOKEN=$(grep -i '^X-Subject-Token:' "$RESP_HEADERS" | sed 's/^[^:]*: *//' | tr -d '\r' || true)
+                  [ -n "$TOKEN" ] || { echo "获取 Token 失败"; exit 1; }
+
+                  # 2. 仓库名中如带 /，需先替换为 $ 再请求（SWR 文档要求）
+                  REPO_PARAM="${REPO_NAME//\//\$}"
+
+                  # 3. 调用 UpdateRepo 将仓库设置为公开，成功返回 201
+                  STATUS=$(curl -sS -o /tmp/resp.txt -w '%{http_code}' -X PATCH \
+                      "https://swr-api.${HUAWEI_REGION}.myhuaweicloud.com/v2/manage/namespaces/${ALIYUN_NAME_SPACE}/repos/${REPO_PARAM}" \
+                      -H "Content-Type: application/json" \
+                      -H "X-Auth-Token: ${TOKEN}" \
+                      -d '{"is_public": true, "description": "public"}')
+
+                  echo "HTTP status: $STATUS"
+                  if [ "$STATUS" = "201" ]; then
+                      echo "✅ ${ALIYUN_NAME_SPACE}/${REPO_NAME} 已设置为公开"
+                  else
+                      cat /tmp/resp.txt || true
+                      exit 1
+                  fi
