@@ -82,7 +82,18 @@ jobs:
                   echo "Tagging image: $image -> $new_image"
                   docker tag $image $new_image
                   echo "Pushing image: $new_image"
-                  docker push $new_image
+                  for attempt in 1 2 3; do
+                      echo "Push attempt $attempt/3"
+                      if timeout --signal=TERM --kill-after=30s 20m docker push "$new_image"; then
+                          break
+                      fi
+                      if [ "$attempt" -eq 3 ]; then
+                          echo "docker push failed after 3 attempts"
+                          exit 1
+                      fi
+                      echo "docker push failed or timed out, retrying..."
+                      sleep $((attempt * 15))
+                  done
 
                   # 清理镜像
                   echo "开始清理磁盘空间"
