@@ -9,7 +9,7 @@ import (
 
 // ComposeConfig docker-compose.yaml配置结构
 type ComposeConfig struct {
-	Version  string                 `yaml:"version"`
+	Version  string                   `yaml:"version"`
 	Services map[string]ServiceConfig `yaml:"services"`
 }
 
@@ -32,6 +32,9 @@ func ParseComposeFile(filePath string) ([]string, error) {
 	err = yaml.Unmarshal(data, &config)
 	if err != nil {
 		return nil, fmt.Errorf("解析YAML文件失败: %w", err)
+	}
+	if config.Services == nil {
+		return nil, fmt.Errorf("不是有效的docker-compose文件: 缺少services字段")
 	}
 
 	// 提取镜像
@@ -56,6 +59,9 @@ func ParseComposeContent(content string) ([]string, error) {
 	err := yaml.Unmarshal([]byte(content), &config)
 	if err != nil {
 		return nil, fmt.Errorf("解析YAML内容失败: %w", err)
+	}
+	if config.Services == nil {
+		return nil, fmt.Errorf("不是有效的docker-compose内容: 缺少services字段")
 	}
 
 	// 提取镜像
